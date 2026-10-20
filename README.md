@@ -14,8 +14,9 @@ Registry of ERC-8004 (Trustless Agents).
 that was free on 2026-10-20; the ERC editors confirm it, or assign another, when the pull request is opened on
 ethereum/ERCs. ERC-8210 (Agent Assurance, an open pull request: https://github.com/ethereum/ERCs/pull/1632) leaves
 third-party "Backers" and a `depositFor` call to "a separate ERC" in its "Delegated Funding (Reserved)" section. This
-proposal will be raised on ERC-8210's discussion thread (https://ethereum-magicians.org/t/28097) first, before a thread
-of its own, so that the agent ERC family ends up with one backer ERC, not two.
+proposal is raised on ERC-8210's discussion thread first
+([post 50](https://ethereum-magicians.org/t/erc-8210-agent-assurance/28097/50)), before a thread of its own, so that the
+agent ERC family ends up with one backer ERC, not two.
 
 ## Why
 
