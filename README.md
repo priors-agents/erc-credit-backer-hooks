@@ -1,4 +1,4 @@
-# Agent Credit Backers (draft ERC)
+# ERC-8456: Agent Credit Backers (draft)
 
 A standard way for a third party (a staker, a collateral vault, an insurer) to stand behind a lender's credit line to
 an agent identity and absorb its loss. With the identity owner's signed consent, the backer puts itself behind a line
@@ -10,13 +10,12 @@ backing.
 It extends the Agent Credit Lines draft. Identities are token ids of an ERC-721 identity registry, such as the Identity
 Registry of ERC-8004 (Trustless Agents).
 
-**Status: draft, not submitted.** The text is in
-[`ERCS/erc-draft_agent_credit_backers.md`](ERCS/erc-draft_agent_credit_backers.md). Its `eip: 99907` is a placeholder:
-the ERC editors assign the real number when the pull request is opened on ethereum/ERCs. ERC-8210 (Agent Assurance, an
-open pull request: https://github.com/ethereum/ERCs/pull/1632) leaves third-party "Backers" and a `depositFor` call to
-"a separate ERC" in its "Delegated Funding (Reserved)" section. This proposal will be raised on ERC-8210's discussion
-thread (https://ethereum-magicians.org/t/28097) first, before a thread of its own, so that the agent ERC family ends up
-with one backer ERC, not two.
+**Status: draft, not submitted.** The text is in [`ERCS/erc-8456.md`](ERCS/erc-8456.md). ERC-8456 is the next number
+that was free on 2026-10-20; the ERC editors confirm it, or assign another, when the pull request is opened on
+ethereum/ERCs. ERC-8210 (Agent Assurance, an open pull request: https://github.com/ethereum/ERCs/pull/1632) leaves
+third-party "Backers" and a `depositFor` call to "a separate ERC" in its "Delegated Funding (Reserved)" section. This
+proposal will be raised on ERC-8210's discussion thread (https://ethereum-magicians.org/t/28097) first, before a thread
+of its own, so that the agent ERC family ends up with one backer ERC, not two.
 
 ## Why
 
@@ -31,7 +30,7 @@ consents, and it makes sure a backer can never block a repayment or a default.
 
 | Path | What |
 |---|---|
-| `ERCS/erc-draft_agent_credit_backers.md` | The ERC text, in the ethereum/ERCs template |
+| `ERCS/erc-8456.md` | The ERC text, in the ethereum/ERCs template |
 | `src/ICreditBacker.sol` | The backer interface, and the release reasons |
 | `src/IBackedCreditLine.sol` | The lender interface |
 | `src/IAgentCreditLine.sol` | The Agent Credit Lines interface it extends, copied unchanged |
@@ -55,12 +54,11 @@ CI runs all three on every push (`.github/workflows/ci.yml`).
 
 ## Related drafts
 
-- Agent Credit Lines: one interface to borrow, repay and default against any lender to agent identities (to be
-  published as github.com/priors-agents/erc-agent-credit-lines). This proposal extends its interface.
-- Agent Default Registry: lender-reported defaults any contract can check (to be published as
-  github.com/priors-agents/erc-agent-default-registry). A default charged to a backer here is the same default a lender
-  records there.
-- Credit history for ERC-8004 agents: a profile of the ERC-8004 Reputation Registry for loan outcomes
+- ERC-8450 Agent Credit Lines: one interface to borrow, repay and default against any lender to agent identities
+  (github.com/priors-agents/ERC-8450). This proposal extends its interface.
+- ERC-8452 Agent Default Registry: lender-reported defaults any contract can check (github.com/priors-agents/ERC-8452).
+  A default charged to a backer here is the same default a lender records there.
+- ERC-8449 Credit history for ERC-8004 agents: a profile of the ERC-8004 Reputation Registry for loan outcomes
   (`docs/ERC-8004-CREDIT.md` in github.com/priors-agents/priors). Its loan class (`unsecured`, `secured:<kind>`) is the
   lender's own claim today; with a backer on record (`backerOfLoan`), a reader can check it.
 
