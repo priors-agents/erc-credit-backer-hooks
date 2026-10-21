@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: CC0-1.0
 pragma solidity ^0.8.20;
 
-// From ERC-8450 Agent Credit Lines (github.com/priors-agents/ERC-8450), copied unchanged. The Agent Credit Backers
-// draft extends it.
+// From the Agent Credit Lines draft (github.com/priors-agents/erc-agent-credit-lines), copied unchanged. The Agent
+// Credit Backers draft extends it.
 
 /// @title Agent Credit Lines (draft ERC)
 /// @notice Revolving credit extended by a lender to identities of an ERC-721 identity registry (an ERC-8004 Identity

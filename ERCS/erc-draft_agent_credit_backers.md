@@ -1,5 +1,5 @@
 ---
-eip: 8456
+eip: 99907
 title: Agent Credit Backers
 description: Third parties that stand behind a lender's credit line to an agent identity and absorb its defaults
 author: Priors contributors (@priors-agents)
