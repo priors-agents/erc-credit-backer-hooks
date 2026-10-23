@@ -10,13 +10,13 @@ backing.
 It extends the Agent Credit Lines draft. Identities are token ids of an ERC-721 identity registry, such as the Identity
 Registry of ERC-8004 (Trustless Agents).
 
-**Status: draft, not submitted.** The text is in
-[`ERCS/erc-draft_agent_credit_backers.md`](ERCS/erc-draft_agent_credit_backers.md). Its `eip: 99907` is a placeholder:
-the ERC editors assign the real number when the pull request is opened on ethereum/ERCs. ERC-8210 (Agent Assurance, an
-open pull request: https://github.com/ethereum/ERCs/pull/1632) leaves third-party "Backers" and a `depositFor` call to
-"a separate ERC" in its "Delegated Funding (Reserved)" section. This proposal was raised on ERC-8210's discussion thread
-first ([post 50](https://ethereum-magicians.org/t/erc-8210-agent-assurance/28097/50)), so that the agent ERC family ends
-up with one backer ERC, not two, and is discussed on its own thread since 2026-10-23:
+**Status: draft, submitted as [ethereum/ERCs#2111](https://github.com/ethereum/ERCs/pull/2111).** The text is in
+[`ERCS/erc-draft_agent_credit_backers.md`](ERCS/erc-draft_agent_credit_backers.md). Its `eip: 99907` is a placeholder
+until the ERC editors assign a number. ERC-8210 (Agent Assurance, an open pull request:
+https://github.com/ethereum/ERCs/pull/1632) leaves third-party "Backers" and a `depositFor` call to "a separate ERC" in
+its "Delegated Funding (Reserved)" section. This proposal was raised on ERC-8210's discussion thread first ([post
+50](https://ethereum-magicians.org/t/erc-8210-agent-assurance/28097/50)), so that the agent ERC family ends up with one
+backer ERC, not two, and is discussed on its own thread since 2026-10-23:
 https://ethereum-magicians.org/t/erc-tba-agent-credit-backers/30062. If ERC-8210's authors would rather fold it into
 their reserved section, it can be.
 
