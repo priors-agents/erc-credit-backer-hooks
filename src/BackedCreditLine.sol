@@ -29,7 +29,9 @@ interface IERC1271 {
 ///         the line its backer stands behind, less the principal drawn under it, capped by the contract's own balance
 ///         of the asset. Fees are `feeBps` per 30 days of term, rounded up. On a default it takes the principal from
 ///         the backer's balance, up to the backer's allowance, before it tells the backer; a backer that leaves part
-///         of a loss unpaid gets no new credit here. The calls to the asset during a default, and `onDefault` and
+///         of a loss unpaid gets no new credit here until that part is paid in (`payLoss`, or a recovery). Payments
+///         toward a defaulted loan (`recover`) go to that unpaid part first, then back to the backer up to what it
+///         paid, then to the fee. The calls to the asset during a default, and `onDefault` and
 ///         `onRelease`, each get a fixed gas budget and cannot stop the lender. A delegate is bound to the owner who named it. Derived from `SimpleCreditLine`, the reference
 ///         lender of the Agent Credit Lines draft (CC0).
 /// @dev Not audited. A reference for the interface.
@@ -66,6 +68,14 @@ contract BackedCreditLine is IBackedCreditLine, IERC165 {
         address namedBy;
     }
 
+    /// @dev A defaulted loan's charge to its backer, and what came in for it after the default.
+    struct Loss {
+        uint256 paid; // what the backer paid of its charge: at the default, and through payLoss
+        uint256 unpaid; // the part of the charge still unpaid
+        uint256 recovered; // all that recover took for the loan
+        uint256 returned; // the part of `recovered` that went to the backer
+    }
+
     IERC721OwnerOf private immutable _registry;
     IERC20Minimal private immutable _asset;
     uint16 public immutable feeBps;
@@ -77,7 +87,9 @@ contract BackedCreditLine is IBackedCreditLine, IERC165 {
     mapping(uint256 => Delegation) private _delegations;
     mapping(uint256 => LoanInfo) private _loans;
     mapping(uint256 => address) private _loanBackers;
-    /// @notice Principal of defaulted loans a backer was charged and did not pay. Any amount bars it here.
+    mapping(uint256 => Loss) private _losses;
+    /// @notice Principal of defaulted loans a backer was charged and that is still unpaid: the sum of `unpaid` in
+    ///         `lossInfo` over its loans. Any amount bars it here.
     mapping(address => uint256) public unpaidLoss;
     uint256 public loanCount;
     bool private _locked;
@@ -92,6 +104,9 @@ contract BackedCreditLine is IBackedCreditLine, IERC165 {
     error FeeAboveMax(uint256 fee);
     error DueAboveMax(uint256 due);
     error NotActive();
+    error NotDefaulted();
+    error NothingUnpaid();
+    error NothingToRecover();
     error NotDefaultable(uint64 defaultableAt);
     error TransferFailed();
     error BackerRefused();
@@ -194,6 +209,15 @@ contract BackedCreditLine is IBackedCreditLine, IERC165 {
 
     function consentNonce(uint256 agentId) external view returns (uint256) {
         return _nonces[agentId];
+    }
+
+    function lossInfo(uint256 loanId)
+        external
+        view
+        returns (uint256 paid, uint256 unpaid, uint256 recovered, uint256 returned)
+    {
+        Loss storage l = _losses[loanId];
+        return (l.paid, l.unpaid, l.recovered, l.returned);
     }
 
     /// @notice The EIP-712 digest the owner signs to let `backer` stand behind a line of `line` for `agentId`.
@@ -313,6 +337,7 @@ contract BackedCreditLine is IBackedCreditLine, IERC165 {
         b.outstanding -= principal;
         b.line -= principal; // the cover this loan used is spent
         uint256 paid = _take(backer, principal);
+        _losses[loanId] = Loss({paid: paid, unpaid: principal - paid, recovered: 0, returned: 0});
         if (paid < principal) unpaidLoss[backer] += principal - paid;
         emit BackerCharged(loanId, agentId, backer, principal, paid);
         _notify(
@@ -321,6 +346,52 @@ contract BackedCreditLine is IBackedCreditLine, IERC165 {
             ICreditBacker.onDefault.selector,
             abi.encodeCall(ICreditBacker.onDefault, (address(this), agentId, loanId, principal, paid))
         );
+    }
+
+    // ---------------------------------------------------------------- after a default
+
+    /// @notice Anyone: the backer, or anyone for it. Pays up to `amount` of the part of the backer's charge for a
+    ///         defaulted loan that it left unpaid, as the backer's own payment, so a later recovery can return it to
+    ///         the backer. The backer is not called.
+    function payLoss(uint256 loanId, uint256 amount) external lock returns (uint256 taken) {
+        if (_loans[loanId].status != LoanStatus.Defaulted) revert NotDefaulted();
+        Loss storage l = _losses[loanId];
+        taken = amount < l.unpaid ? amount : l.unpaid;
+        if (taken == 0) revert NothingUnpaid();
+        address backer = _loanBackers[loanId];
+        l.paid += taken;
+        l.unpaid -= taken;
+        unpaidLoss[backer] -= taken;
+        emit LossPaid(loanId, backer, msg.sender, taken);
+        if (!_asset.transferFrom(msg.sender, address(this), taken)) revert TransferFailed();
+    }
+
+    /// @notice Anyone: the agent, its owner, a collector. Pays up to `amount` toward a defaulted loan, up to its
+    ///         principal and fee in all. It goes first to the part of the backer's charge left unpaid, which the
+    ///         lender keeps; then to the backer, up to what the backer paid and has not had back; then to the fee,
+    ///         which the lender keeps. The backer is not called; its part is transferred to it.
+    function recover(uint256 loanId, uint256 amount) external lock returns (uint256 taken) {
+        LoanInfo storage loan = _loans[loanId];
+        if (loan.status != LoanStatus.Defaulted) revert NotDefaulted();
+        Loss storage l = _losses[loanId];
+        uint256 left = loan.principal + loan.fee - l.recovered;
+        taken = amount < left ? amount : left;
+        if (taken == 0) revert NothingToRecover();
+
+        address backer = _loanBackers[loanId];
+        uint256 toUnpaid = taken < l.unpaid ? taken : l.unpaid;
+        uint256 rest = taken - toUnpaid;
+        uint256 owedToBacker = l.paid - l.returned;
+        uint256 toBacker = rest < owedToBacker ? rest : owedToBacker;
+        // What is left of `rest` is the fee's: `left` caps `taken` at the unpaid part, the backer's due and the fee
+        // not yet recovered.
+        l.unpaid -= toUnpaid;
+        unpaidLoss[backer] -= toUnpaid;
+        l.recovered += taken;
+        l.returned += toBacker;
+        emit Recovered(loanId, backer, msg.sender, taken, toBacker);
+        if (!_asset.transferFrom(msg.sender, address(this), taken)) revert TransferFailed();
+        if (toBacker != 0 && !_asset.transfer(backer, toBacker)) revert TransferFailed();
     }
 
     // ---------------------------------------------------------------- internals

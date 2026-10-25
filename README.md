@@ -5,7 +5,9 @@ an agent identity and absorb its loss. With the identity owner's signed consent,
 of a given size. The lender asks it before each draw (`canBorrow`), tells it of each draw (`onBorrow`), takes the
 principal of each defaulted loan from its balance and tells it (`onDefault`), and tells it when part of the line is no
 longer its concern (`onRelease`). A backer can refuse a draw; it cannot stop a repayment, a default or the end of its
-backing.
+backing. After a default, a part of the loss the backer left unpaid can be paid in later (`payLoss`), money paid toward
+the defaulted loan (`recover`) goes to that part, then back to the backer, then to the fee, and `lossInfo` keeps the
+figures per loan.
 
 It extends the Agent Credit Lines draft. Identities are token ids of an ERC-721 identity registry, such as the Identity
 Registry of ERC-8004 (Trustless Agents).
@@ -39,7 +41,7 @@ consents, and it makes sure a backer can never block a repayment or a default.
 | `src/IAgentCreditLine.sol` | The Agent Credit Lines interface it extends, copied unchanged |
 | `src/BackedCreditLine.sol` | A reference lender that lends only behind a backer, derived from the Agent Credit Lines reference lender (not audited) |
 | `src/StakeBacker.sol` | A reference backer that pays a defaulted principal from its stake (not audited) |
-| `test/BackedCreditLine.t.sol` | Foundry tests of the lender: consent, draws, repayments, defaults, releases, every gas amount for a default, backers that revert, burn their gas, return huge payloads or call back into the lender, and tokens that misbehave the same ways while a loss is taken |
+| `test/BackedCreditLine.t.sol` | Foundry tests of the lender: consent, draws, repayments, defaults, late payments of a loss and recoveries after a default, releases, every gas amount for a default, backers that revert, burn their gas, return huge payloads or call back into the lender, and tokens that misbehave the same ways while a loss is taken |
 | `test/StakeBacker.t.sol` | Foundry tests of the reference backer |
 | `test/Fixture.sol`, `test/mocks/Mocks.sol` | Shared setup, an identity registry, a token and test backers |
 | `scripts/lint-erc.sh` | Lints the ERC text with eipw the way the ethereum/ERCs CI does |

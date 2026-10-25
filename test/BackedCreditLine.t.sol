@@ -22,8 +22,13 @@ contract BackedCreditLineTest is Fixture {
     );
     event BackerHookFailed(uint256 indexed agentId, address indexed backer, bytes4 selector);
     event Defaulted(uint256 indexed loanId, uint256 indexed agentId, address indexed owner, uint256 principal);
+    event LossPaid(uint256 indexed loanId, address indexed backer, address indexed payer, uint256 amount);
+    event Recovered(
+        uint256 indexed loanId, address indexed backer, address indexed payer, uint256 amount, uint256 toBacker
+    );
 
     uint256 constant FEE_10_FOR_7_DAYS = 23_334; // 10 units at 1% per 30 days for 7 days, rounded up
+    uint256 constant DUE_10_FOR_7_DAYS = 10e6 + FEE_10_FOR_7_DAYS;
 
     RecordingBacker backer;
 
@@ -846,5 +851,235 @@ contract BackedCreditLineTest is Fixture {
         assertEq(backer.charged() + backer.released() + finalLine, given);
         assertEq(backer.paidTotal(), backer.charged());
         assertFalse(backer.badReason());
+    }
+
+    // ------------------------------------------------------------- after a default
+
+    /// @dev A backer holding 4 units behind a line of 50, and a 10-unit loan of 7 days that defaulted under it: 4 paid,
+    ///      6 left unpaid.
+    function _partlyPaidDefault() internal returns (RecordingBacker poor, uint256 loanId) {
+        poor = new RecordingBacker();
+        usd.mint(address(poor), 4e6);
+        poor.approve(usd, address(lender), 50e6);
+        _back(poor, 50e6);
+        loanId = _borrow(10e6, 7 days);
+        _default(loanId);
+    }
+
+    function _funded(string memory name, uint256 amount) internal returns (address who) {
+        who = makeAddr(name);
+        usd.mint(who, amount);
+        vm.prank(who);
+        usd.approve(address(lender), amount);
+    }
+
+    function _assertLoss(uint256 loanId, uint256 paid, uint256 unpaid, uint256 recovered, uint256 returned)
+        internal
+        view
+    {
+        (uint256 p, uint256 u, uint256 r, uint256 t) = lender.lossInfo(loanId);
+        assertEq(p, paid, "paid");
+        assertEq(u, unpaid, "unpaid");
+        assertEq(r, recovered, "recovered");
+        assertEq(t, returned, "returned");
+    }
+
+    /// @dev A 10-unit default collects 4 units and `onDefault` reverts: the line still shrinks by 10, and what the
+    ///      backer paid for that loan stays readable by a contract, without the `BackerCharged` log.
+    function test_lossInfo_partialCollectionWithAFailedOnDefault() public {
+        MisbehavingBacker bad = new MisbehavingBacker();
+        usd.mint(address(bad), 4e6);
+        bad.approve(usd, address(lender), 50e6);
+        _back(bad, 50e6);
+        bad.setMode(MisbehavingBacker.Mode.Revert);
+        uint256 loanId = _borrow(10e6, 7 days);
+        vm.warp(lender.loanInfo(loanId).defaultableAt);
+        vm.expectEmit(true, true, true, true);
+        emit BackerCharged(loanId, AGENT, address(bad), 10e6, 4e6);
+        vm.expectEmit(true, true, true, true);
+        emit BackerHookFailed(AGENT, address(bad), ICreditBacker.onDefault.selector);
+        lender.markDefault(loanId);
+
+        (uint256 line, uint256 outstanding) = lender.backedLine(AGENT);
+        assertEq(line, 40e6);
+        assertEq(outstanding, 0);
+        _assertLoss(loanId, 4e6, 6e6, 0, 0);
+        assertEq(lender.unpaidLoss(address(bad)), 6e6);
+    }
+
+    function test_lossInfo_zerosUnlessDefaulted() public {
+        _back(backer, 50e6);
+        uint256 active = _borrow(10e6, 7 days);
+        uint256 repaid = _borrow(10e6, 7 days);
+        _repay(repaid);
+        _assertLoss(active, 0, 0, 0, 0);
+        _assertLoss(repaid, 0, 0, 0, 0);
+        _assertLoss(99, 0, 0, 0, 0);
+        _default(active);
+        _assertLoss(active, 10e6, 0, 0, 0);
+    }
+
+    function test_payLossAndRecover_revertUnlessDefaulted() public {
+        _back(backer, 50e6);
+        uint256 active = _borrow(10e6, 7 days);
+        uint256 repaid = _borrow(10e6, 7 days);
+        _repay(repaid);
+        address payer = _funded("payer2", 100e6);
+        uint256[3] memory ids = [active, repaid, uint256(99)];
+        for (uint256 i; i < ids.length; ++i) {
+            vm.prank(payer);
+            vm.expectRevert(BackedCreditLine.NotDefaulted.selector);
+            lender.payLoss(ids[i], 1e6);
+            vm.prank(payer);
+            vm.expectRevert(BackedCreditLine.NotDefaulted.selector);
+            lender.recover(ids[i], 1e6);
+        }
+    }
+
+    function test_payLoss_paysTheUnpaidPart_andCreditComesBack() public {
+        (RecordingBacker poor, uint256 loanId) = _partlyPaidDefault();
+        assertEq(lender.availableCredit(AGENT), 0);
+        address manager = _funded("manager", 100e6);
+        uint256 cash = usd.balanceOf(address(lender));
+
+        vm.expectEmit(true, true, true, true);
+        emit LossPaid(loanId, address(poor), manager, 6e6);
+        vm.prank(manager);
+        assertEq(lender.payLoss(loanId, 100e6), 6e6); // no more than is unpaid
+
+        assertEq(usd.balanceOf(address(lender)), cash + 6e6);
+        _assertLoss(loanId, 10e6, 0, 0, 0);
+        assertEq(lender.unpaidLoss(address(poor)), 0);
+        assertEq(lender.availableCredit(AGENT), 40e6); // the line less the cover the default spent, open again
+        vm.prank(manager);
+        vm.expectRevert(BackedCreditLine.NothingUnpaid.selector);
+        lender.payLoss(loanId, 1);
+    }
+
+    /// @dev 4 of 10 paid by the backer at the default. What the agent brings back pays the 6 left unpaid first, then
+    ///      the backer's 4, then the fee, and no more than the principal and the fee in all.
+    function test_recover_unpaidPartThenBackerThenFee() public {
+        (RecordingBacker poor, uint256 loanId) = _partlyPaidDefault();
+        address agentWallet = _funded("agentWallet", 100e6);
+        uint256 cash = usd.balanceOf(address(lender));
+
+        vm.expectEmit(true, true, true, true);
+        emit Recovered(loanId, address(poor), agentWallet, 5e6, 0);
+        vm.prank(agentWallet);
+        lender.recover(loanId, 5e6); // all of it to the unpaid part
+        _assertLoss(loanId, 4e6, 1e6, 5e6, 0);
+        assertEq(lender.unpaidLoss(address(poor)), 1e6);
+
+        vm.expectEmit(true, true, true, true);
+        emit Recovered(loanId, address(poor), agentWallet, 3e6, 2e6);
+        vm.prank(agentWallet);
+        lender.recover(loanId, 3e6); // the last unit unpaid, then 2 back to the backer
+        _assertLoss(loanId, 4e6, 0, 8e6, 2e6);
+        assertEq(usd.balanceOf(address(poor)), 2e6);
+
+        vm.prank(agentWallet);
+        assertEq(lender.recover(loanId, 100e6), 2e6 + FEE_10_FOR_7_DAYS); // the backer's last 2, then the fee
+        _assertLoss(loanId, 4e6, 0, DUE_10_FOR_7_DAYS, 4e6);
+        assertEq(usd.balanceOf(address(poor)), 4e6); // what it paid, back
+        assertEq(usd.balanceOf(address(lender)), cash + 6e6 + FEE_10_FOR_7_DAYS);
+        assertEq(lender.unpaidLoss(address(poor)), 0);
+        assertEq(lender.availableCredit(AGENT), 40e6);
+
+        vm.prank(agentWallet);
+        vm.expectRevert(BackedCreditLine.NothingToRecover.selector);
+        lender.recover(loanId, 1);
+    }
+
+    function test_recover_backerThatPaidInFull_getsItBackBeforeTheFee() public {
+        _back(backer, 50e6);
+        uint256 loanId = _borrow(10e6, 7 days);
+        _default(loanId);
+        assertEq(usd.balanceOf(address(backer)), 90e6);
+        address agentWallet = _funded("agentWallet", 100e6);
+
+        vm.expectEmit(true, true, true, true);
+        emit Recovered(loanId, address(backer), agentWallet, 10e6, 10e6);
+        vm.prank(agentWallet);
+        lender.recover(loanId, 10e6);
+        assertEq(usd.balanceOf(address(backer)), 100e6);
+        _assertLoss(loanId, 10e6, 0, 10e6, 10e6);
+    }
+
+    /// @dev A backer that pays its shortfall late is repaid from a later recovery as if it had paid at the default.
+    function test_payLoss_thenRecover_returnsWhatTheBackerPaidLate() public {
+        (RecordingBacker poor, uint256 loanId) = _partlyPaidDefault();
+        address manager = _funded("manager", 6e6);
+        vm.prank(manager);
+        lender.payLoss(loanId, 6e6);
+        address agentWallet = _funded("agentWallet", 100e6);
+        vm.prank(agentWallet);
+        assertEq(lender.recover(loanId, 100e6), DUE_10_FOR_7_DAYS);
+        assertEq(usd.balanceOf(address(poor)), 10e6);
+        _assertLoss(loanId, 10e6, 0, DUE_10_FOR_7_DAYS, 10e6);
+    }
+
+    function test_payLossAndRecover_neverCallTheBacker() public {
+        (RecordingBacker poor, uint256 loanId) = _partlyPaidDefault();
+        vm.etch(address(poor), hex"60006000fd"); // from now on every call to the backer reverts
+        address payer = _funded("payer2", 100e6);
+        vm.expectCall(address(poor), bytes(""), 0);
+        vm.startPrank(payer);
+        lender.payLoss(loanId, 1e6);
+        lender.recover(loanId, 100e6);
+        vm.stopPrank();
+        _assertLoss(loanId, 5e6, 0, DUE_10_FOR_7_DAYS, 5e6);
+        assertEq(usd.balanceOf(address(poor)), 5e6);
+    }
+
+    /// @dev Any sequence of late payments and recoveries after a default that collected any part of the principal:
+    ///      the record matches the money, the backer never gets back more than it paid, nothing is taken beyond the
+    ///      principal and the fee, and the fee is reached only once the unpaid part and the backer are covered.
+    function testFuzz_afterADefault_everyUnitIsAccountedFor(
+        uint8 collected,
+        bool[8] calldata late,
+        uint32[8] calldata sizes
+    ) public {
+        uint256 atDefault = bound(collected, 0, 10) * 1e6;
+        RecordingBacker b = new RecordingBacker();
+        usd.mint(address(b), atDefault);
+        b.approve(usd, address(lender), 50e6);
+        _back(b, 50e6);
+        uint256 loanId = _borrow(10e6, 7 days);
+        _default(loanId);
+        assertEq(usd.balanceOf(address(b)), 0);
+        uint256 cash = usd.balanceOf(address(lender));
+        address payer = _funded("payer2", 1_000e6);
+
+        uint256 paidLate;
+        uint256 recovered;
+        for (uint256 i; i < 8; ++i) {
+            uint256 size = bound(sizes[i], 1, 12e6);
+            vm.prank(payer);
+            if (late[i]) {
+                try lender.payLoss(loanId, size) returns (uint256 got) {
+                    paidLate += got;
+                } catch {}
+            } else {
+                try lender.recover(loanId, size) returns (uint256 got) {
+                    recovered += got;
+                } catch {}
+            }
+        }
+
+        (uint256 p, uint256 u, uint256 r, uint256 t) = lender.lossInfo(loanId);
+        assertEq(p, atDefault + paidLate);
+        assertEq(r, recovered);
+        assertLe(r, DUE_10_FOR_7_DAYS);
+        assertLe(t, p);
+        assertEq(usd.balanceOf(address(b)), t);
+        assertEq(usd.balanceOf(address(lender)), cash + paidLate + r - t);
+        assertEq(lender.unpaidLoss(address(b)), u);
+        // The principal is paid by the backer, still unpaid, or covered by what recoveries kept for the lender.
+        uint256 towardUnpaid = 10e6 - p - u;
+        assertLe(towardUnpaid + t, r);
+        uint256 towardFee = r - t - towardUnpaid;
+        assertLe(towardFee, FEE_10_FOR_7_DAYS);
+        if (t != 0) assertEq(u, 0); // the backer is paid back only once nothing is unpaid
+        if (towardFee != 0) assertEq(t, p); // and the fee only once the backer has all it paid
     }
 }
