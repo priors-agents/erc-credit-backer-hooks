@@ -46,6 +46,8 @@ contract MockToken {
     mapping(address => uint256) private _balances;
     mapping(address => mapping(address => uint256)) public allowance;
     mapping(address => Trap) public trap;
+    /// @notice A freeze list, as USDC and USDT keep: no transfer from or to a frozen address.
+    mapping(address => bool) public frozen;
 
     function mint(address to, uint256 amount) external {
         _balances[to] += amount;
@@ -53,6 +55,10 @@ contract MockToken {
 
     function setTrap(address account, Trap t) external {
         trap[account] = t;
+    }
+
+    function setFrozen(address account, bool isFrozen) external {
+        frozen[account] = isFrozen;
     }
 
     function balanceOf(address account) external view returns (uint256) {
@@ -67,12 +73,14 @@ contract MockToken {
 
     function transfer(address to, uint256 amount) external returns (bool) {
         require(trap[msg.sender] != Trap.Revert, "frozen");
+        require(!frozen[msg.sender] && !frozen[to], "frozen");
         _balances[msg.sender] -= amount;
         _balances[to] += amount;
         return true;
     }
 
     function transferFrom(address from, address to, uint256 amount) external returns (bool) {
+        require(!frozen[from] && !frozen[to], "frozen");
         Trap t = trap[from];
         if (t == Trap.Revert) revert("frozen");
         if (t == Trap.ReturnFalse) return false;

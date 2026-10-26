@@ -6,8 +6,8 @@ of a given size. The lender asks it before each draw (`canBorrow`), tells it of 
 principal of each defaulted loan from its balance and tells it (`onDefault`), and tells it when part of the line is no
 longer its concern (`onRelease`). A backer can refuse a draw; it cannot stop a repayment, a default or the end of its
 backing. After a default, a part of the loss the backer left unpaid can be paid in later (`payLoss`), money paid toward
-the defaulted loan (`recover`) goes to that part, then back to the backer, then to the fee, and `lossInfo` keeps the
-figures per loan.
+the defaulted loan (`recover`) goes to that part, then back to the backer (credited to it, and paid out by `payBacker`,
+which anyone may call), then to the fee, and `lossInfo` keeps the figures per loan.
 
 It extends the Agent Credit Lines draft. Identities are token ids of an ERC-721 identity registry, such as the Identity
 Registry of ERC-8004 (Trustless Agents).

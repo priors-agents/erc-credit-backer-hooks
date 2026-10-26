@@ -26,6 +26,8 @@ contract BackedCreditLineTest is Fixture {
     event Recovered(
         uint256 indexed loanId, address indexed backer, address indexed payer, uint256 amount, uint256 toBacker
     );
+    event BackerPaid(address indexed backer, uint256 amount);
+    event ConsentsRevoked(uint256 indexed agentId, address indexed owner, uint256 nonce);
 
     uint256 constant FEE_10_FOR_7_DAYS = 23_334; // 10 units at 1% per 30 days for 7 days, rounded up
     uint256 constant DUE_10_FOR_7_DAYS = 10e6 + FEE_10_FOR_7_DAYS;
@@ -289,6 +291,53 @@ contract BackedCreditLineTest is Fixture {
         vm.prank(owner);
         vm.expectRevert(BackedCreditLine.NoBacker.selector);
         lender.removeBacker(AGENT);
+    }
+
+    /// @dev The owner signs a raise of the line, then removes the backer before the raise is used: the signature
+    ///      cannot bring the backer back. The same when the backer removes itself.
+    function test_removeBacker_voidsAConsentNotYetUsed() public {
+        _back(backer, 50e6);
+        uint256 deadline = _deadline();
+        bytes memory raise = _consent(address(backer), 80e6); // signed, not submitted
+        uint256 nonce = lender.consentNonce(AGENT);
+        vm.prank(owner);
+        lender.removeBacker(AGENT);
+        vm.expectRevert(BackedCreditLine.BadConsent.selector);
+        backer.setBackerAt(lender, AGENT, 80e6, deadline, raise);
+        assertEq(lender.backerOf(AGENT), address(0));
+        assertEq(lender.consentNonce(AGENT), nonce + 1);
+
+        _back(backer, 50e6);
+        raise = _consent(address(backer), 80e6);
+        backer.removeAt(lender, AGENT);
+        vm.expectRevert(BackedCreditLine.BadConsent.selector);
+        backer.setBackerAt(lender, AGENT, 80e6, deadline, raise);
+        assertEq(lender.backerOf(AGENT), address(0));
+    }
+
+    /// @dev A consent signed while the identity has no backer, voided by its owner before it is used.
+    function test_revokeConsents_byTheOwnerOnly_voidsConsentsNotYetUsed() public {
+        uint256 deadline = _deadline();
+        bytes memory sig = _consent(address(backer), 50e6); // nonce 0, no backer yet
+        address key = makeAddr("key");
+        vm.prank(owner);
+        lender.setDelegate(AGENT, key);
+        address[3] memory others = [stranger, address(backer), key];
+        for (uint256 i; i < others.length; ++i) {
+            vm.prank(others[i]);
+            vm.expectRevert(BackedCreditLine.NotOwner.selector);
+            lender.revokeConsents(AGENT);
+        }
+
+        vm.expectEmit(true, true, true, true);
+        emit ConsentsRevoked(AGENT, owner, 1);
+        vm.prank(owner);
+        lender.revokeConsents(AGENT);
+        assertEq(lender.consentNonce(AGENT), 1);
+        vm.expectRevert(BackedCreditLine.BadConsent.selector);
+        backer.setBackerAt(lender, AGENT, 50e6, deadline, sig);
+        _back(backer, 50e6); // a consent signed at the new nonce works
+        assertEq(lender.backerOf(AGENT), address(backer));
     }
 
     // ------------------------------------------------------------- drawing
@@ -975,11 +1024,14 @@ contract BackedCreditLineTest is Fixture {
         vm.prank(agentWallet);
         lender.recover(loanId, 3e6); // the last unit unpaid, then 2 back to the backer
         _assertLoss(loanId, 4e6, 0, 8e6, 2e6);
-        assertEq(usd.balanceOf(address(poor)), 2e6);
+        assertEq(lender.dueToBacker(address(poor)), 2e6);
 
         vm.prank(agentWallet);
         assertEq(lender.recover(loanId, 100e6), 2e6 + FEE_10_FOR_7_DAYS); // the backer's last 2, then the fee
         _assertLoss(loanId, 4e6, 0, DUE_10_FOR_7_DAYS, 4e6);
+        assertEq(lender.dueToBacker(address(poor)), 4e6);
+        assertEq(usd.balanceOf(address(poor)), 0); // credited, not sent
+        lender.payBacker(address(poor));
         assertEq(usd.balanceOf(address(poor)), 4e6); // what it paid, back
         assertEq(usd.balanceOf(address(lender)), cash + 6e6 + FEE_10_FOR_7_DAYS);
         assertEq(lender.unpaidLoss(address(poor)), 0);
@@ -1001,8 +1053,62 @@ contract BackedCreditLineTest is Fixture {
         emit Recovered(loanId, address(backer), agentWallet, 10e6, 10e6);
         vm.prank(agentWallet);
         lender.recover(loanId, 10e6);
+        lender.payBacker(address(backer));
         assertEq(usd.balanceOf(address(backer)), 100e6);
         _assertLoss(loanId, 10e6, 0, 10e6, 10e6);
+    }
+
+    /// @dev On a token with a freeze list (USDC keeps one), the backer's address is frozen after it paid at the default.
+    ///      A recovery that reaches the backer's part still goes through, and reaches the fee behind it; the backer's
+    ///      part waits at the lender until the backer can receive it, and anyone can then pay it, to the backer only.
+    function test_recover_frozenBacker_blocksNeitherTheRecoveryNorTheFee() public {
+        _back(backer, 50e6);
+        uint256 loanId = _borrow(10e6, 7 days);
+        _default(loanId); // the backer paid all 10 units
+        usd.setFrozen(address(backer), true);
+        address agentWallet = _funded("agentWallet", 100e6);
+        uint256 cash = usd.balanceOf(address(lender));
+
+        vm.expectEmit(true, true, true, true);
+        emit Recovered(loanId, address(backer), agentWallet, DUE_10_FOR_7_DAYS, 10e6);
+        vm.prank(agentWallet);
+        assertEq(lender.recover(loanId, 100e6), DUE_10_FOR_7_DAYS); // the backer's 10, then the fee
+        _assertLoss(loanId, 10e6, 0, DUE_10_FOR_7_DAYS, 10e6);
+        assertEq(usd.balanceOf(address(lender)), cash + DUE_10_FOR_7_DAYS);
+        assertEq(lender.dueToBacker(address(backer)), 10e6);
+
+        vm.expectRevert(bytes("frozen")); // the freeze holds up the backer's own payment, nothing else
+        lender.payBacker(address(backer));
+        usd.setFrozen(address(backer), false);
+        vm.expectEmit(true, true, true, true);
+        emit BackerPaid(address(backer), 10e6);
+        vm.prank(stranger);
+        assertEq(lender.payBacker(address(backer)), 10e6);
+        assertEq(usd.balanceOf(address(backer)), 100e6);
+        assertEq(usd.balanceOf(address(lender)), cash + FEE_10_FOR_7_DAYS);
+        assertEq(lender.dueToBacker(address(backer)), 0);
+        vm.expectRevert(BackedCreditLine.NothingDue.selector);
+        lender.payBacker(address(backer));
+    }
+
+    /// @dev What a recovery credits to a backer is the backer's: the lender holds it but does not lend it.
+    function test_dueToBacker_isNotLent() public {
+        _back(backer, 50e6);
+        uint256 loanId = _borrow(10e6, 7 days);
+        _default(loanId);
+        address agentWallet = _funded("agentWallet", 10e6);
+        vm.prank(agentWallet);
+        lender.recover(loanId, 10e6); // all of it due to the backer
+        uint256 cash = usd.balanceOf(address(lender));
+        vm.prank(address(lender));
+        usd.transfer(makeAddr("elsewhere"), cash - 15e6); // 15 units left, 10 of them the backer's
+
+        assertEq(lender.availableCredit(AGENT), 5e6);
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(BackedCreditLine.OverCredit.selector, 5e6));
+        lender.borrow(AGENT, 5e6 + 1, 7 days, wallet, type(uint256).max);
+        lender.payBacker(address(backer));
+        assertEq(lender.availableCredit(AGENT), 5e6);
     }
 
     /// @dev A backer that pays its shortfall late is repaid from a later recovery as if it had paid at the default.
@@ -1014,6 +1120,7 @@ contract BackedCreditLineTest is Fixture {
         address agentWallet = _funded("agentWallet", 100e6);
         vm.prank(agentWallet);
         assertEq(lender.recover(loanId, 100e6), DUE_10_FOR_7_DAYS);
+        lender.payBacker(address(poor));
         assertEq(usd.balanceOf(address(poor)), 10e6);
         _assertLoss(loanId, 10e6, 0, DUE_10_FOR_7_DAYS, 10e6);
     }
@@ -1026,6 +1133,7 @@ contract BackedCreditLineTest is Fixture {
         vm.startPrank(payer);
         lender.payLoss(loanId, 1e6);
         lender.recover(loanId, 100e6);
+        lender.payBacker(address(poor));
         vm.stopPrank();
         _assertLoss(loanId, 5e6, 0, DUE_10_FOR_7_DAYS, 5e6);
         assertEq(usd.balanceOf(address(poor)), 5e6);
@@ -1071,6 +1179,8 @@ contract BackedCreditLineTest is Fixture {
         assertEq(r, recovered);
         assertLe(r, DUE_10_FOR_7_DAYS);
         assertLe(t, p);
+        assertEq(lender.dueToBacker(address(b)), t); // credited, then paid out
+        if (t != 0) lender.payBacker(address(b));
         assertEq(usd.balanceOf(address(b)), t);
         assertEq(usd.balanceOf(address(lender)), cash + paidLate + r - t);
         assertEq(lender.unpaidLoss(address(b)), u);

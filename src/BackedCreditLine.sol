@@ -30,8 +30,10 @@ interface IERC1271 {
 ///         of the asset. Fees are `feeBps` per 30 days of term, rounded up. On a default it takes the principal from
 ///         the backer's balance, up to the backer's allowance, before it tells the backer; a backer that leaves part
 ///         of a loss unpaid gets no new credit here until that part is paid in (`payLoss`, or a recovery). Payments
-///         toward a defaulted loan (`recover`) go to that unpaid part first, then back to the backer up to what it
-///         paid, then to the fee. The calls to the asset during a default, and `onDefault` and
+///         toward a defaulted loan (`recover`) go to that unpaid part first, then to the backer up to what it paid,
+///         credited to it and kept out of what is lent until anyone calls `payBacker`, then to the fee. Removing a
+///         backer, or the owner's `revokeConsents`, voids every consent not yet used. The calls to the asset during a
+///         default, and `onDefault` and
 ///         `onRelease`, each get a fixed gas budget and cannot stop the lender. A delegate is bound to the owner who named it. Derived from `SimpleCreditLine`, the reference
 ///         lender of the Agent Credit Lines draft (CC0).
 /// @dev Not audited. A reference for the interface.
@@ -73,7 +75,7 @@ contract BackedCreditLine is IBackedCreditLine, IERC165 {
         uint256 paid; // what the backer paid of its charge: at the default, and through payLoss
         uint256 unpaid; // the part of the charge still unpaid
         uint256 recovered; // all that recover took for the loan
-        uint256 returned; // the part of `recovered` that went to the backer
+        uint256 returned; // the part of `recovered` credited to the backer
     }
 
     IERC721OwnerOf private immutable _registry;
@@ -91,6 +93,10 @@ contract BackedCreditLine is IBackedCreditLine, IERC165 {
     /// @notice Principal of defaulted loans a backer was charged and that is still unpaid: the sum of `unpaid` in
     ///         `lossInfo` over its loans. Any amount bars it here.
     mapping(address => uint256) public unpaidLoss;
+    /// @notice What recoveries have credited to a backer and `payBacker` has not yet paid it.
+    mapping(address => uint256) public dueToBacker;
+    /// @dev The sum of `dueToBacker` over every backer: cash the lender holds and does not lend.
+    uint256 private _dueToBackers;
     uint256 public loanCount;
     bool private _locked;
 
@@ -107,6 +113,7 @@ contract BackedCreditLine is IBackedCreditLine, IERC165 {
     error NotDefaulted();
     error NothingUnpaid();
     error NothingToRecover();
+    error NothingDue();
     error NotDefaultable(uint64 defaultableAt);
     error TransferFailed();
     error BackerRefused();
@@ -149,6 +156,15 @@ contract BackedCreditLine is IBackedCreditLine, IERC165 {
         emit DelegateSet(agentId, owner, delegate);
     }
 
+    /// @notice The owner voids every consent for `agentId` not yet used, such as one signed while the identity had no
+    ///         backer: an owner whose key cannot withdraw a signature has no other way before the deadline.
+    function revokeConsents(uint256 agentId) external {
+        address owner = _registry.ownerOf(agentId);
+        if (owner != msg.sender) revert NotOwner();
+        uint256 nonce = ++_nonces[agentId];
+        emit ConsentsRevoked(agentId, owner, nonce);
+    }
+
     // ---------------------------------------------------------------- views
 
     function identityRegistry() external view returns (address) {
@@ -168,13 +184,15 @@ contract BackedCreditLine is IBackedCreditLine, IERC165 {
         return d.delegate == account && d.namedBy == owner;
     }
 
-    /// @notice The backed line's room, capped by the cash on hand; zero without a backer, or under a backer that left
-    ///         a loss unpaid. The backer is not asked: a client previews a draw with its `canBorrow`.
+    /// @notice The backed line's room, capped by the cash on hand less what is due to backers; zero without a backer, or
+    ///         under a backer that left a loss unpaid. The backer is not asked: a client previews a draw with its
+    ///         `canBorrow`.
     function availableCredit(uint256 agentId) public view returns (uint256) {
         Backing storage b = _backings[agentId];
         if (b.backer == address(0) || unpaidLoss[b.backer] != 0) return 0;
         uint256 room = b.line > b.outstanding ? b.line - b.outstanding : 0;
         uint256 cash = _asset.balanceOf(address(this));
+        cash = cash > _dueToBackers ? cash - _dueToBackers : 0; // the backers' money is not lent
         return room < cash ? room : cash;
     }
 
@@ -274,6 +292,8 @@ contract BackedCreditLine is IBackedCreditLine, IERC165 {
         if (b.backer == address(0)) revert NoBacker();
         if (msg.sender != b.backer && msg.sender != _ownerOf(agentId)) revert NotBackerOrOwner();
         if (b.outstanding != 0) revert LoansOutstanding(b.outstanding);
+        // A consent signed before the removal, such as a raise not yet used, cannot bring the backing back.
+        _nonces[agentId] += 1;
         delete _backings[agentId];
         emit BackerSet(agentId, address(0), 0);
         _release(agentId, b.backer, b.line, RELEASE_REMOVED);
@@ -369,7 +389,8 @@ contract BackedCreditLine is IBackedCreditLine, IERC165 {
     /// @notice Anyone: the agent, its owner, a collector. Pays up to `amount` toward a defaulted loan, up to its
     ///         principal and fee in all. It goes first to the part of the backer's charge left unpaid, which the
     ///         lender keeps; then to the backer, up to what the backer paid and has not had back; then to the fee,
-    ///         which the lender keeps. The backer is not called; its part is transferred to it.
+    ///         which the lender keeps. The backer is not called and nothing is sent to it: its part is credited to it,
+    ///         for `payBacker`, so an address the asset will not pay cannot stop a recovery or the fee behind it.
     function recover(uint256 loanId, uint256 amount) external lock returns (uint256 taken) {
         LoanInfo storage loan = _loans[loanId];
         if (loan.status != LoanStatus.Defaulted) revert NotDefaulted();
@@ -389,9 +410,21 @@ contract BackedCreditLine is IBackedCreditLine, IERC165 {
         unpaidLoss[backer] -= toUnpaid;
         l.recovered += taken;
         l.returned += toBacker;
+        dueToBacker[backer] += toBacker;
+        _dueToBackers += toBacker;
         emit Recovered(loanId, backer, msg.sender, taken, toBacker);
         if (!_asset.transferFrom(msg.sender, address(this), taken)) revert TransferFailed();
-        if (toBacker != 0 && !_asset.transfer(backer, toBacker)) revert TransferFailed();
+    }
+
+    /// @notice Anyone. Pays `backer` what recoveries have credited to it, at its own address and no other. A token
+    ///         that refuses transfers to that address stops only this call. The backer is not called.
+    function payBacker(address backer) external lock returns (uint256 amount) {
+        amount = dueToBacker[backer];
+        if (amount == 0) revert NothingDue();
+        dueToBacker[backer] = 0;
+        _dueToBackers -= amount;
+        emit BackerPaid(backer, amount);
+        if (!_asset.transfer(backer, amount)) revert TransferFailed();
     }
 
     // ---------------------------------------------------------------- internals
