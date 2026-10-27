@@ -1,4 +1,4 @@
-# Agent Credit Backers (draft ERC)
+# ERC-8467: Agent Credit Backers (draft)
 
 A standard way for a third party (a staker, a collateral vault, an insurer) to stand behind a lender's credit line to
 an agent identity and absorb its loss. With the identity owner's signed consent, the backer puts itself behind a line
@@ -13,13 +13,12 @@ It extends the Agent Credit Lines draft. Identities are token ids of an ERC-721 
 Registry of ERC-8004 (Trustless Agents).
 
 **Status: draft, submitted as [ethereum/ERCs#2111](https://github.com/ethereum/ERCs/pull/2111).** The text is in
-[`ERCS/erc-draft_agent_credit_backers.md`](ERCS/erc-draft_agent_credit_backers.md). Its `eip: 99907` is a placeholder
-until the ERC editors assign a number. ERC-8210 (Agent Assurance, an open pull request:
+[`ERCS/erc-8467.md`](ERCS/erc-8467.md). The editors assigned it ERC-8467 on 2026-10-27. ERC-8210 (Agent Assurance, an open pull request:
 https://github.com/ethereum/ERCs/pull/1632) leaves third-party "Backers" and a `depositFor` call to "a separate ERC" in
 its "Delegated Funding (Reserved)" section. This proposal was raised on ERC-8210's discussion thread first ([post
 50](https://ethereum-magicians.org/t/erc-8210-agent-assurance/28097/50)), so that the agent ERC family ends up with one
 backer ERC, not two, and is discussed on its own thread since 2026-10-23:
-https://ethereum-magicians.org/t/erc-tba-agent-credit-backers/30062. If ERC-8210's authors would rather fold it into
+https://ethereum-magicians.org/t/erc-8467-agent-credit-backers/30062. If ERC-8210's authors would rather fold it into
 their reserved section, it can be.
 
 ## Why
@@ -35,7 +34,7 @@ consents, and it makes sure a backer can never block a repayment or a default.
 
 | Path | What |
 |---|---|
-| `ERCS/erc-draft_agent_credit_backers.md` | The ERC text, in the ethereum/ERCs template |
+| `ERCS/erc-8467.md` | The ERC text, in the ethereum/ERCs template |
 | `src/ICreditBacker.sol` | The backer interface, and the release reasons |
 | `src/IBackedCreditLine.sol` | The lender interface |
 | `src/IAgentCreditLine.sol` | The Agent Credit Lines interface it extends, copied unchanged |
